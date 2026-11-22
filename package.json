@@ -1,0 +1,14 @@
+{
+  "name": "pi-no-compact",
+  "version": "1.0.0",
+  "private": true,
+  "license": "SUL-1.0",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}

@@ -19,14 +19,21 @@ When no complete fragment can be kept, for example when the branch ends with a t
 
 ## Usage
 
-Install, update and uninstall the plugin with Pi's git package commands. It is downloaded only through git, never from npm. Pin a tag or a commit:
+Install, update and uninstall the plugin with Pi's git package commands. It is downloaded only through git, never from npm:
 
 ```bash
-pi install git:github.com/<owner>/<repository>@<ref>        # install a pinned version
-pi install git:github.com/<owner>/<repository>@<other-ref>  # move to another version
-pi update git:github.com/<owner>/<repository>               # keep the pinned ref
-pi uninstall git:github.com/<owner>/<repository>            # remove the plugin; same as pi remove
+pi install git:github.com/caeloren/pi-no-compact    # install the latest commit of main
+pi update git:github.com/caeloren/pi-no-compact     # update to the latest commit of main
+pi uninstall git:github.com/caeloren/pi-no-compact  # remove the plugin; same as pi remove
 ```
+
+The repository has no tags. To stay on one version, install a commit by its full 40-character hash:
+
+```bash
+pi install git:github.com/caeloren/pi-no-compact@<full-commit-hash>
+```
+
+`pi update` then keeps that commit. Installing another full hash moves to that commit, and installing without a hash returns to the latest commit of main. Pi cannot update a shortened hash, so always use the full one.
 
 Both tools are active as soon as the plugin loads. Every parameter is required; there are no defaults.
 

@@ -24,7 +24,7 @@ type SessionReader = ExtensionContext["sessionManager"];
 
 const CONTINUATION_INSTRUCTION = [
 	"Context was compacted. Earlier records are no longer in your context but remain available through history_search and history_read.",
-	"Before continuing, read every earlier message, then the latest records.",
+	"Before continuing, read earlier messages, then the latest records.",
 	"For any other missing detail, search instead of guessing, and use history_read for exact text.",
 ].join("\n");
 
@@ -51,7 +51,7 @@ const KIND_BY_ROLE = {
 	branchSummary: "branch_summary",
 } as const satisfies Record<string, HistoryKind>;
 
-const CURSOR_VERSION = 1;
+const CURSOR_VERSION = 2;
 
 const READ_ONLY_ANNOTATIONS = {
 	readOnlyHint: true,
@@ -161,15 +161,27 @@ function isModelVisible(message: AgentMessage): boolean {
 		case "bashExecution":
 			return message.excludeFromContext !== true;
 		case "assistant":
-			return message.stopReason !== "error" && message.stopReason !== "aborted";
+			return !isFailedAttempt(message);
 		default:
 			return true;
 	}
 }
 
-function visibleMessages(entry: SessionEntry, edits: ReadonlyMap<string, ContextEditEntry>): AgentMessage[] {
+/**
+ * A failed or aborted attempt. Pi leaves it out of the context, but first gives every tool call that
+ * has no result yet its `No result provided` result.
+ */
+function isFailedAttempt(message: AgentMessage): boolean {
+	return message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted");
+}
+
+function contextMessages(entry: SessionEntry, edits: ReadonlyMap<string, ContextEditEntry>): AgentMessage[] {
 	if (entry.type !== "message" && entry.type !== "custom_message" && entry.type !== "branch_summary") return [];
-	return projectEntry(entry, edits.get(entry.id)).filter(isModelVisible);
+	return projectEntry(entry, edits.get(entry.id));
+}
+
+function visibleMessages(entry: SessionEntry, edits: ReadonlyMap<string, ContextEditEntry>): AgentMessage[] {
+	return contextMessages(entry, edits).filter(isModelVisible);
 }
 
 /**
@@ -317,19 +329,29 @@ function orphanResultError(entryId: string): Error {
 	return new Error(`Entry ${entryId} is a tool result without a model-visible tool call`);
 }
 
+function failedAttemptError(entryId: string): Error {
+	return new Error(`Entry ${entryId} is a failed or aborted attempt between tool calls and their results`);
+}
+
 /**
  * Where the kept fragment starts: the last model-visible message, or, when the branch ends with
  * tool results, the assistant message whose tool calls they answer. Missing results are not an
- * error, because Pi adds them when it sends the context.
+ * error, because Pi adds them when it sends the context. A failed or aborted attempt between the
+ * calls and their results is an error, because Pi would then send two results for one call.
  */
 function findFirstKeptEntryId(branch: readonly SessionEntry[]): string {
 	const edits = latestContextEdits(branch);
 	const trailingResults: { entryId: string; toolCallId: string }[] = [];
+	let failedAttemptId: string | undefined;
 	for (let index = branch.length - 1; index >= 0; index--) {
 		const entry = branch[index];
-		const messages = visibleMessages(entry, edits);
+		const messages = contextMessages(entry, edits);
 		for (let position = messages.length - 1; position >= 0; position--) {
 			const message = messages[position];
+			if (!isModelVisible(message)) {
+				if (trailingResults.length > 0 && isFailedAttempt(message)) failedAttemptId ??= entry.id;
+				continue;
+			}
 			if (message.role === "toolResult") {
 				trailingResults.push({ entryId: entry.id, toolCallId: message.toolCallId });
 				continue;
@@ -341,6 +363,7 @@ function findFirstKeptEntryId(branch: readonly SessionEntry[]): string {
 			);
 			const orphan = trailingResults.find((result) => !callIds.has(result.toolCallId));
 			if (orphan) throw orphanResultError(orphan.entryId);
+			if (failedAttemptId) throw failedAttemptError(failedAttemptId);
 			return requireBranchEntry(branch, entry.id);
 		}
 	}
@@ -475,14 +498,23 @@ function isCursorState(value: unknown): value is CursorState {
 	);
 }
 
+/** Detects a changed cursor. It has no secret, so it does not stop a deliberate rewrite. */
+function cursorCheck(body: string): string {
+	return createHash("sha256").update(body).digest("base64url");
+}
+
+/** The state as base64url JSON, then `.` and the check of that text. */
 function encodeCursor(state: CursorState): string {
-	return Buffer.from(JSON.stringify(state), "utf8").toString("base64url");
+	const body = Buffer.from(JSON.stringify(state), "utf8").toString("base64url");
+	return `${body}.${cursorCheck(body)}`;
 }
 
 function decodeCursor(cursor: string): CursorState {
+	const [body] = cursor.split(".", 1);
+	if (cursor !== `${body}.${cursorCheck(body)}`) throw new Error(INVALID_CURSOR);
 	let state: unknown;
 	try {
-		state = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+		state = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
 	} catch {
 		throw new Error(INVALID_CURSOR);
 	}
@@ -557,7 +589,13 @@ function searchHistory(params: HistorySearchInput, sessionManager: SessionReader
 		}
 	}
 	hits.sort((a, b) => compareKeys(params.order, a.key, b.key));
-	const remaining = cursor ? hits.filter((hit) => compareKeys(params.order, hit.key, cursor.after) > 0) : hits;
+	let start = 0;
+	if (cursor) {
+		// The position must be a result of this search; any other position would skip or repeat results.
+		start = hits.findIndex(({ key }) => key.every((value, index) => value === cursor.after[index])) + 1;
+		if (start === 0) throw new Error(INVALID_CURSOR);
+	}
+	const remaining = hits.slice(start);
 	const page = remaining.slice(0, params.limit);
 	const last = page.at(-1);
 	const leaf = branch[leafIndex];

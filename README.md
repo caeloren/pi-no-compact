@@ -11,11 +11,11 @@ Everything else stays in the session and is retrieved on demand with two tools, 
 
 ```text
 Context was compacted. Earlier records are no longer in your context but remain available through history_search and history_read.
-Before continuing, read every earlier message, then the latest records.
+Before continuing, read earlier messages, then the latest records.
 For any other missing detail, search instead of guessing, and use history_read for exact text.
 ```
 
-When no complete fragment can be kept, for example when the branch ends with a tool result whose tool call the model cannot see, the plugin reports `Compaction failed: <reason>` as a Pi error notification, stops the current operation and cancels the compaction. It never falls back to Pi's built-in compaction.
+When no complete fragment can be kept, the plugin reports `Compaction failed: <reason>` as a Pi error notification, stops the current operation and cancels the compaction. For example, the branch may end with a tool result whose tool call the model cannot see, or with tool results separated from their calls by a failed or aborted attempt, where Pi would send both its `No result provided` result and the real result. It never falls back to Pi's built-in compaction.
 
 ## Usage
 
@@ -60,7 +60,7 @@ Results are blocks of records, ordered by their position on the branch, never by
 
 The result is one JSON object: `query`, `match`, `totalMatches` (matching blocks in the snapshot), `matches` and `nextCursor`. Each match only says where a block is: `entryId`, `blockIndex`, `timestamp`, `kind`, `toolName` and `derived` (true for branch summaries). Matches carry no text; read the content with `history_read`.
 
-The first page fixes a snapshot: the session, the leaf of the active branch, the entries up to that leaf, `query`, `match`, `kinds`, `order` and the cursor format. Entries added later are not part of that search. `nextCursor` stores the sort position of the page's last result, not an offset, so pages never repeat or skip a result. Every page applies the latest context edits. A cursor fails, and the search starts again with `cursor: null`, when it comes from another session, when the active branch no longer contains the snapshot leaf, when a new context edit changes the visibility or content of an entry in the snapshot, or when it is used with another `query`, `match`, `kinds` or `order`. `limit` may change between pages. Page until `nextCursor` is `null` to list every candidate.
+The first page fixes a snapshot: the session, the leaf of the active branch, the entries up to that leaf, `query`, `match`, `kinds`, `order` and the cursor format. Entries added later are not part of that search. `nextCursor` holds the sort position of the page's last result, not an offset, and a SHA-256 check of its content, so pages never repeat or skip a result. Every page applies the latest context edits. A cursor fails, and the search starts again with `cursor: null`, when it was changed, when its position is not a result of the search, when it comes from another session, when the active branch no longer contains the snapshot leaf, when a new context edit changes the visibility or content of an entry in the snapshot, or when it is used with another `query`, `match`, `kinds` or `order`. `limit` may change between pages. Page until `nextCursor` is `null` to list every candidate.
 
 `history_read` reads whole records by `entryId`:
 
@@ -81,6 +81,7 @@ Argument types, required fields and ranges are checked by Pi before the tools ru
 - The tools return only what the model was entitled to see: user messages, assistant text and tool calls, tool results, visible `!` commands, custom messages and branch summaries, after the latest context edit of each entry. A context edit that omits an entry hides it from both tools; a replacement shows only the replaced content. Thinking, signatures, the system prompt, tool declarations, usage, `details`, `!!` commands, failed or aborted attempts, compaction summaries, and the calls and results of `history_search` and `history_read` themselves are never searched or read.
 - Session files are not validated, so a record may hold malformed content. As in Pi's own readers of stored history, content that is not an array counts as empty and an item that is not an object is skipped: only the malformed part cannot be searched or read, and every other record still can. While such a record is still in the context, Pi itself can fail on it; the plugin does not check what Pi sends.
 - The plugin sets no output limits: no byte or line cap, no maximum for `limit`, `entryIds`, `around` or `maxImages`, and `history_read` never truncates or splits a record. Model, provider and runtime limits still apply, so a very large result, or a very large kept fragment, can make the next request fail.
+- The cursor check has no secret key. It catches a cursor changed by mistake, but a cursor rewritten on purpose to the position of another result, with its check recomputed, is accepted. That can only skip or repeat results of that search; it reaches nothing the tools would not return anyway.
 - Whether images reach the model also depends on the model's image support, Pi's image settings, the branch and context edits.
 - The plugin keeps no data of its own: no transcript copy, database, index, embeddings, remote service or background work. It reads the session through Pi's API on each call and never changes, deletes or rewrites it. A compaction appends Pi's normal compaction entry.
 - Pi decides when to compact, and its own checks, such as "Nothing to compact", still apply. Instructions passed to `/compact` are ignored, because no summary is written.

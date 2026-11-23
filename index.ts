@@ -51,8 +51,6 @@ const KIND_BY_ROLE = {
 	branchSummary: "branch_summary",
 } as const satisfies Record<string, HistoryKind>;
 
-/** Excerpt length in UTF-16 code units, the length Pi's grep keeps of a line. */
-const EXCERPT_LENGTH = 500;
 const CURSOR_VERSION = 1;
 
 const READ_ONLY_ANNOTATIONS = {
@@ -363,87 +361,59 @@ function requireBranchEntry(branch: readonly SessionEntry[], entryId: string): s
 // ---------------------------------------------------------------------------
 
 const wordSegmenter = new Intl.Segmenter("zh-Hant", { granularity: "word" });
-const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const CJK_CHARACTER = /^[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Hangul}\p{scx=Bopomofo}]$/u;
-
-interface Token {
-	readonly text: string;
-	readonly start: number;
-}
 
 /**
  * Word-like segments in order. Contiguous CJK characters become two-character pairs (one
  * character on its own stays a token); pairs never cross spaces, punctuation or other scripts.
  */
-function tokenize(text: string): Token[] {
-	const tokens: Token[] = [];
-	let run: { chars: string[]; starts: number[]; end: number } | undefined;
+function tokenize(text: string): string[] {
+	const tokens: string[] = [];
+	let run: { chars: string[]; end: number } | undefined;
 	const flushRun = (): void => {
 		if (!run) return;
-		const { chars, starts } = run;
-		if (chars.length === 1) tokens.push({ text: chars[0], start: starts[0] });
-		for (let index = 0; index + 1 < chars.length; index++) {
-			tokens.push({ text: chars[index] + chars[index + 1], start: starts[index] });
-		}
+		const { chars } = run;
+		if (chars.length === 1) tokens.push(chars[0]);
+		for (let index = 0; index + 1 < chars.length; index++) tokens.push(chars[index] + chars[index + 1]);
 		run = undefined;
 	};
 	for (const { segment, index, isWordLike } of wordSegmenter.segment(text)) {
 		if (!isWordLike) continue;
 		let word = "";
-		let wordStart = index;
 		let offset = index;
 		for (const char of segment) {
 			if (CJK_CHARACTER.test(char)) {
 				if (word) {
-					tokens.push({ text: word, start: wordStart });
+					tokens.push(word);
 					word = "";
 				}
 				if (!run || run.end !== offset) {
 					flushRun();
-					run = { chars: [], starts: [], end: offset };
+					run = { chars: [], end: offset };
 				}
 				run.chars.push(char);
-				run.starts.push(offset);
 				run.end = offset + char.length;
 			} else {
 				flushRun();
-				if (!word) wordStart = offset;
 				word += char;
 			}
 			offset += char.length;
 		}
-		if (word) tokens.push({ text: word, start: wordStart });
+		if (word) tokens.push(word);
 	}
 	flushRun();
 	return tokens;
 }
 
-/** Maps an offset in the NFKC form of `text` back to `text`, one grapheme cluster at a time. */
-function originalOffset(text: string, normalized: string, offset: number): number {
-	if (normalized === text) return offset;
-	let original = 0;
-	let mapped = 0;
-	for (const { segment } of graphemeSegmenter.segment(text)) {
-		mapped += segment.normalize("NFKC").length;
-		if (mapped > offset) return original;
-		original += segment.length;
-	}
-	return text.length;
-}
-
 interface Matcher {
 	/** 0 when the text does not match. */
 	score(text: string): number;
-	/** Offset of the first hit, or null when browsing. */
-	firstHit(text: string): number | null;
 }
 
 function createMatcher(query: string | null, match: SearchMatch): Matcher {
-	if (query === null) return { score: () => 1, firstHit: () => null };
-	if (match === "literal") {
-		return { score: (text) => (text.includes(query) ? 1 : 0), firstHit: (text) => text.indexOf(query) };
-	}
-	const queryTokens = new Set(tokenize(query.normalize("NFKC")).map((token) => token.text));
+	if (query === null) return { score: () => 1 };
+	if (match === "literal") return { score: (text) => (text.includes(query) ? 1 : 0) };
+	const queryTokens = new Set(tokenize(query.normalize("NFKC")));
 	const queryTokenList = [...queryTokens];
 	return {
 		score(text) {
@@ -452,36 +422,11 @@ function createMatcher(query: string | null, match: SearchMatch): Matcher {
 			if (!queryTokenList.some((token) => normalized.includes(token))) return 0;
 			const found = new Set<string>();
 			for (const token of tokenize(normalized)) {
-				if (queryTokens.has(token.text)) found.add(token.text);
+				if (queryTokens.has(token)) found.add(token);
 			}
 			return found.size;
 		},
-		firstHit(text) {
-			const normalized = text.normalize("NFKC");
-			const hit = tokenize(normalized).find((token) => queryTokens.has(token.text));
-			return hit ? originalOffset(text, normalized, hit.start) : 0;
-		},
 	};
-}
-
-function isHighSurrogate(text: string, index: number): boolean {
-	const code = text.charCodeAt(index);
-	return code >= 0xd800 && code <= 0xdbff;
-}
-
-function isLowSurrogate(text: string, index: number): boolean {
-	const code = text.charCodeAt(index);
-	return code >= 0xdc00 && code <= 0xdfff;
-}
-
-/** At most EXCERPT_LENGTH code units around the hit, or from the start; never splits a surrogate pair. */
-function excerpt(text: string, hit: number | null): { excerpt: string; truncated: boolean } {
-	if (text.length <= EXCERPT_LENGTH) return { excerpt: text, truncated: false };
-	let start = hit === null ? 0 : Math.min(Math.max(hit - EXCERPT_LENGTH / 2, 0), text.length - EXCERPT_LENGTH);
-	let end = start + EXCERPT_LENGTH;
-	if (isLowSurrogate(text, start) && isHighSurrogate(text, start - 1)) start++;
-	if (isHighSurrogate(text, end - 1) && isLowSurrogate(text, end)) end--;
-	return { excerpt: text.slice(start, end), truncated: start > 0 || end < text.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -605,7 +550,7 @@ function searchHistory(params: HistorySearchInput, sessionManager: SessionReader
 	for (const record of buildHistory(range, edits)) {
 		for (const block of record.blocks) {
 			if (!kinds.includes(block.kind)) continue;
-			// Images are never searched; browsing lists them as their placeholder.
+			// Images are never searched; browsing lists their blocks too.
 			if (block.image && params.query !== null) continue;
 			const score = matcher.score(block.text);
 			if (score > 0) hits.push({ record, block, key: [score, record.branchIndex, block.blockIndex] });
@@ -642,7 +587,6 @@ function searchHistory(params: HistorySearchInput, sessionManager: SessionReader
 			kind: block.kind,
 			toolName: block.toolName,
 			derived: record.kind === "branch_summary",
-			...excerpt(block.text, matcher.firstHit(block.text)),
 		})),
 		nextCursor,
 	});
@@ -744,9 +688,9 @@ export default function noCompact(pi: ExtensionAPI): void {
 		description:
 			"Search or browse earlier records of the current conversation (this session's active branch), including records no longer in context. " +
 			'Browse: query null, match null, order "oldest" or "newest". Search: a non-empty query with match "terms" or "literal", any order. Matching is case-sensitive. ' +
-			"A tool call is searched as its name and argument values. Images are never searched; browsing shows them as [image: <mimeType>]. " +
-			"Each match is one block of a record: entryId, blockIndex, timestamp, kind, toolName, derived (true for branch summaries), excerpt (at most 500 UTF-16 code units, around the first hit when searching, from the start when browsing) and truncated. " +
-			"The first page fixes the searched records; pass nextCursor with the same query, match, kinds and order until nextCursor is null. Use history_read for full content.",
+			"A tool call is searched as its name and argument values. Images are never searched; browsing lists their blocks too. " +
+			"Each match is one block of a record and only says where it is: entryId, blockIndex, timestamp, kind, toolName and derived (true for branch summaries). Matches carry no text. " +
+			"The first page fixes the searched records; pass nextCursor with the same query, match, kinds and order until nextCursor is null. Read the content with history_read.",
 		promptSnippet: "Search or browse earlier records of this conversation",
 		promptGuidelines: [
 			"Use history_search instead of guessing when a detail from earlier in this conversation is not in context.",
@@ -768,7 +712,7 @@ export default function noCompact(pi: ExtensionAPI): void {
 			"around adds that many readable records before and after each requested record; overlapping ranges are merged. " +
 			"With includeImages true, the first maxImages images are attached after the text, in order, and the rest stay placeholders.",
 		promptSnippet: "Read earlier records of this conversation exactly",
-		promptGuidelines: ["Use history_read for the exact text of records found with history_search."],
+		promptGuidelines: ["Use history_read to read the records that history_search finds; its matches carry no text."],
 		parameters: historyReadParameters,
 		annotations: READ_ONLY_ANNOTATIONS,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

@@ -51,8 +51,6 @@ const KIND_BY_ROLE = {
 	branchSummary: "branch_summary",
 } as const satisfies Record<string, HistoryKind>;
 
-const CURSOR_VERSION = 2;
-
 const READ_ONLY_ANNOTATIONS = {
 	readOnlyHint: true,
 	destructiveHint: false,
@@ -560,20 +558,27 @@ function requireBranchEntry(branch: readonly SessionEntry[], entryId: unknown): 
 // ---------------------------------------------------------------------------
 
 const wordSegmenter = new Intl.Segmenter("zh-Hant", { granularity: "word" });
-const CJK_CHARACTER = /^[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Hangul}\p{scx=Bopomofo}]$/u;
+/** A CJK character that is not punctuation or a symbol, so punctuation such as U+30A0 ends a run. */
+const CJK_CHARACTER = /^(?![\p{P}\p{S}])[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Hangul}\p{scx=Bopomofo}]$/u;
+/** A token is a word only with a letter or a number in it; punctuation alone never is. */
+const WORD_CHARACTER = /[\p{L}\p{N}]/u;
 
 /**
  * Word-like segments in order. Contiguous CJK characters become two-character pairs (one
  * character on its own stays a token); pairs never cross spaces, punctuation or other scripts.
+ * Tokens without a letter or a number are left out.
  */
 function tokenize(text: string): string[] {
 	const tokens: string[] = [];
+	const add = (token: string): void => {
+		if (WORD_CHARACTER.test(token)) tokens.push(token);
+	};
 	let run: { chars: string[]; end: number } | undefined;
 	const flushRun = (): void => {
 		if (!run) return;
 		const { chars } = run;
-		if (chars.length === 1) tokens.push(chars[0]);
-		for (let index = 0; index + 1 < chars.length; index++) tokens.push(chars[index] + chars[index + 1]);
+		if (chars.length === 1) add(chars[0]);
+		for (let index = 0; index + 1 < chars.length; index++) add(chars[index] + chars[index + 1]);
 		run = undefined;
 	};
 	for (const { segment, index, isWordLike } of wordSegmenter.segment(text)) {
@@ -583,7 +588,7 @@ function tokenize(text: string): string[] {
 		for (const char of segment) {
 			if (CJK_CHARACTER.test(char)) {
 				if (word) {
-					tokens.push(word);
+					add(word);
 					word = "";
 				}
 				if (!run || run.end !== offset) {
@@ -598,7 +603,7 @@ function tokenize(text: string): string[] {
 			}
 			offset += char.length;
 		}
-		if (word) tokens.push(word);
+		if (word) add(word);
 	}
 	flushRun();
 	return tokens;
@@ -641,7 +646,6 @@ function compareKeys(order: SearchOrder, a: SortKey, b: SortKey): number {
 }
 
 interface CursorState {
-	readonly v: number;
 	readonly session: string;
 	/** The ID of the snapshot's last entry. */
 	readonly leaf: string;
@@ -660,7 +664,6 @@ function isCursorState(value: unknown): value is CursorState {
 	const state = value as Record<string, unknown>;
 	const { after, kinds } = state;
 	return (
-		state.v === CURSOR_VERSION &&
 		typeof state.session === "string" &&
 		typeof state.leaf === "string" &&
 		(state.query === null || typeof state.query === "string") &&
@@ -818,7 +821,6 @@ function searchHistory(params: HistorySearchInput, sessionManager: SessionReader
 	const nextCursor =
 		last && end && remaining.length > page.length
 			? encodeCursor({
-					v: CURSOR_VERSION,
 					session: sessionId,
 					leaf: end.id,
 					query: params.query,

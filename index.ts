@@ -646,14 +646,19 @@ function createMatcher(query: string | null, match: SearchMatch): Matcher {
 	return {
 		score(text) {
 			const normalized = text.normalize("NFKC");
-			// A whole-token hit needs the token somewhere in the text; skip segmenting texts without any.
-			if (!queryTokenList.some((token) => normalized.includes(token))) return 0;
+			// Every token is a substring of the normalized text, so only query tokens found as substrings can
+			// match; with none, the segmenter is not called. A substring alone is not a match.
+			let possible = 0;
+			for (const token of queryTokenList) {
+				if (normalized.includes(token)) possible++;
+			}
+			if (possible === 0) return 0;
 			const found = new Set<string>();
-			// Once every query token is found the score cannot grow: token processing stops and no further
-			// segments are taken from the segmenter.
+			// Once every possible query token is found as a whole token the score cannot grow: token
+			// processing stops and no further segments are taken from the segmenter.
 			visitTokens(normalized, (token) => {
 				if (queryTokens.has(token)) found.add(token);
-				return found.size === queryTokens.size;
+				return found.size === possible;
 			});
 			return found.size;
 		},
@@ -893,10 +898,15 @@ function readHistory(params: HistoryReadInput, sessionManager: SessionReader): (
 	}
 	const branch = sessionManager.getBranch();
 	const records = buildHistory(branch, latestContextEdits(branch));
+	// Positions of the readable records by entry ID, for this call only; a repeated ID keeps its first.
+	const positionById = new Map<string, number>();
+	for (const [position, record] of records.entries()) {
+		if (!positionById.has(record.entry.id)) positionById.set(record.entry.id, position);
+	}
 	const positions = new Set<number>();
 	for (const entryId of params.entryIds) {
-		const position = records.findIndex((record) => record.entry.id === entryId);
-		if (position < 0) throw unreadableEntryError(entryId, branch);
+		const position = positionById.get(entryId);
+		if (position === undefined) throw unreadableEntryError(entryId, branch);
 		const last = Math.min(records.length - 1, position + params.around);
 		for (let index = Math.max(0, position - params.around); index <= last; index++) positions.add(index);
 	}

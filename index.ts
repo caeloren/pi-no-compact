@@ -557,32 +557,43 @@ function requireBranchEntry(branch: readonly SessionEntry[], entryId: unknown): 
 // Matching
 // ---------------------------------------------------------------------------
 
-const wordSegmenter = new Intl.Segmenter("zh-Hant", { granularity: "word" });
+/** Word boundaries in the runtime's default language; the plugin fixes no language. */
+const wordSegmenter = new Intl.Segmenter(undefined, { granularity: "word" });
 /** A CJK character that is not punctuation or a symbol, so punctuation such as U+30A0 ends a run. */
 const CJK_CHARACTER = /^(?![\p{P}\p{S}])[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Hangul}\p{scx=Bopomofo}]$/u;
 /** A token is a word only with a letter or a number in it; punctuation alone never is. */
 const WORD_CHARACTER = /[\p{L}\p{N}]/u;
 
 /**
- * Word-like segments in order. Contiguous CJK characters become two-character pairs (one
- * character on its own stays a token); pairs never cross spaces, punctuation or other scripts.
- * Tokens without a letter or a number are left out.
+ * Passes the tokens of the text to visit, in order, and returns as soon as visit returns true, without
+ * taking another segment from the segmenter. Tokens are the word-like segments, except that contiguous
+ * CJK characters become two-character pairs, each passed as soon as its second character is read; a
+ * CJK character without a neighbour is a token as soon as its run ends, at the first space,
+ * punctuation, symbol, other script or end of text after it. Pairs never cross spaces, punctuation or
+ * other scripts, and tokens without a letter or a number are left out.
  */
-function tokenize(text: string): string[] {
-	const tokens: string[] = [];
+function visitTokens(text: string, visit: (token: string) => boolean): void {
+	let stopped = false;
 	const add = (token: string): void => {
-		if (WORD_CHARACTER.test(token)) tokens.push(token);
+		if (!stopped && WORD_CHARACTER.test(token)) stopped = visit(token);
 	};
-	let run: { chars: string[]; end: number } | undefined;
-	const flushRun = (): void => {
-		if (!run) return;
-		const { chars } = run;
-		if (chars.length === 1) add(chars[0]);
-		for (let index = 0; index + 1 < chars.length; index++) add(chars[index] + chars[index + 1]);
-		run = undefined;
+	// The open run of contiguous CJK characters: its last character, where that character ends (read
+	// only while a run is open) and whether the run has made a pair.
+	let last = "";
+	let end = 0;
+	let paired = false;
+	const endRun = (): void => {
+		if (last && !paired) add(last);
+		last = "";
+		paired = false;
 	};
 	for (const { segment, index, isWordLike } of wordSegmenter.segment(text)) {
-		if (!isWordLike) continue;
+		if (!isWordLike) {
+			// A space, punctuation or symbol ends the open run, so a lone character there is a token now.
+			endRun();
+			if (stopped) return;
+			continue;
+		}
 		let word = "";
 		let offset = index;
 		for (const char of segment) {
@@ -591,21 +602,34 @@ function tokenize(text: string): string[] {
 					add(word);
 					word = "";
 				}
-				if (!run || run.end !== offset) {
-					flushRun();
-					run = { chars: [], end: offset };
+				if (last && end === offset) {
+					add(last + char);
+					paired = true;
+				} else {
+					endRun();
 				}
-				run.chars.push(char);
-				run.end = offset + char.length;
+				last = char;
+				end = offset + char.length;
 			} else {
-				flushRun();
+				endRun();
 				word += char;
 			}
+			if (stopped) return;
 			offset += char.length;
 		}
 		if (word) add(word);
+		if (stopped) return;
 	}
-	flushRun();
+	endRun();
+}
+
+/** Every token of the text, in order; see visitTokens. */
+function tokenize(text: string): string[] {
+	const tokens: string[] = [];
+	visitTokens(text, (token) => {
+		tokens.push(token);
+		return false;
+	});
 	return tokens;
 }
 
@@ -625,9 +649,12 @@ function createMatcher(query: string | null, match: SearchMatch): Matcher {
 			// A whole-token hit needs the token somewhere in the text; skip segmenting texts without any.
 			if (!queryTokenList.some((token) => normalized.includes(token))) return 0;
 			const found = new Set<string>();
-			for (const token of tokenize(normalized)) {
+			// Once every query token is found the score cannot grow: token processing stops and no further
+			// segments are taken from the segmenter.
+			visitTokens(normalized, (token) => {
 				if (queryTokens.has(token)) found.add(token);
-			}
+				return found.size === queryTokens.size;
+			});
 			return found.size;
 		},
 	};

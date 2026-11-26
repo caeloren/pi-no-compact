@@ -242,7 +242,8 @@ function hasEntryFields(entry: SessionEntry, edit: ContextEditEntry | undefined)
 
 /**
  * Whether the values Pi turns into the text of a `!` command or a branch summary have the types Pi
- * declares. A missing exit code or output path may also be null, which Pi reads as absent.
+ * declares. A missing `exitCode`, `fullOutputPath` or `fullOutputError` may also be null, which Pi
+ * reads as absent.
  */
 function hasTextFields(message: AgentMessage): boolean {
 	switch (message.role) {
@@ -251,7 +252,8 @@ function hasTextFields(message: AgentMessage): boolean {
 				typeof message.command === "string" &&
 				typeof message.output === "string" &&
 				(message.exitCode == null || typeof message.exitCode === "number") &&
-				(message.fullOutputPath == null || typeof message.fullOutputPath === "string")
+				(message.fullOutputPath == null || typeof message.fullOutputPath === "string") &&
+				(message.fullOutputError == null || typeof message.fullOutputError === "string")
 			);
 		case "branchSummary":
 			return typeof message.summary === "string";

@@ -96,3 +96,7 @@ Argument types, required fields and ranges are checked by Pi before the tools ru
 - The plugin is downloaded only through git, and the package has only four files: `LICENSE`, `README.md`, `package.json` and `index.ts`. It has no dependencies, so the dependency install that Pi runs in the checkout has nothing to download. With npm, Pi's default, that install only writes a `package-lock.json` there. `"private": true` keeps the package off npm.
 - Only the latest Pi release is supported; checked with Pi 1.6.1.
 - Licensed under the Sustainable Use License 1.0 (`SUL-1.0`); see `LICENSE`.
+
+
+https://github.com/user-attachments/assets/5c7b1670-c9fd-4c10-92c8-dfbd4ab2b931
+

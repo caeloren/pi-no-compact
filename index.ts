@@ -274,7 +274,7 @@ function modelContent(message: AgentMessage): readonly (TextContent | ImageConte
 interface HistoryBlock {
 	readonly blockIndex: number;
 	readonly kind: HistoryKind;
-	/** Searchable text. An image is its placeholder. */
+	/** Searchable text. An image is its placeholder; a tool call's is empty unless built for a search. */
 	readonly text: string;
 	readonly toolName: string | null;
 	readonly toolCallId?: string;
@@ -368,6 +368,7 @@ function toHistoryRecord(
 	entry: SessionEntry,
 	branchIndex: number,
 	edits: ReadonlyMap<string, ContextEditEntry>,
+	toolCallTexts: boolean,
 ): HistoryRecord | undefined {
 	if (!hasEntryFields(entry, edits.get(entry.id))) return undefined;
 	const blocks: HistoryBlock[] = [];
@@ -393,7 +394,7 @@ function toHistoryRecord(
 						blocks.push({
 							blockIndex,
 							kind: "tool_call",
-							text: toolCallText(block.name, block.arguments),
+							text: toolCallTexts ? toolCallText(block.name, block.arguments) : "",
 							toolName: block.name,
 							toolCallId: block.id,
 							arguments: block.arguments,
@@ -433,10 +434,20 @@ function toHistoryRecord(
 	return kind !== undefined && blocks.length > 0 ? { entry, branchIndex, kind, toolResult, blocks } : undefined;
 }
 
-function buildHistory(range: readonly SessionEntry[], edits: ReadonlyMap<string, ContextEditEntry>): HistoryRecord[] {
+/**
+ * The records of the range, in branch order. Each tool call's searchable text is built only with
+ * `toolCallTexts`, and with `only` just the entries with those IDs are made into records.
+ */
+function buildHistory(
+	range: readonly SessionEntry[],
+	edits: ReadonlyMap<string, ContextEditEntry>,
+	toolCallTexts: boolean,
+	only?: ReadonlySet<string>,
+): HistoryRecord[] {
 	const records: HistoryRecord[] = [];
 	range.forEach((entry, branchIndex) => {
-		const record = toHistoryRecord(entry, branchIndex, edits);
+		if (only && !only.has(entry.id)) return;
+		const record = toHistoryRecord(entry, branchIndex, edits, toolCallTexts);
 		if (record) records.push(record);
 	});
 	return records;
@@ -831,8 +842,10 @@ function searchHistory(params: HistorySearchInput, sessionManager: SessionReader
 	}
 
 	const matcher = createMatcher(params.query, params.match);
+	// Only a search with a query that includes tool calls compares their searchable text.
+	const toolCallTexts = params.query !== null && kinds.includes("tool_call");
 	const hits: { record: HistoryRecord; block: HistoryBlock; key: SortKey }[] = [];
-	for (const record of buildHistory(range, edits)) {
+	for (const record of buildHistory(range, edits, toolCallTexts)) {
 		for (const block of record.blocks) {
 			if (!kinds.includes(block.kind)) continue;
 			// Images are never searched; browsing lists their blocks too.
@@ -848,12 +861,11 @@ function searchHistory(params: HistorySearchInput, sessionManager: SessionReader
 		start = hits.findIndex(({ key }) => key.every((value, index) => value === cursor.after[index])) + 1;
 		if (start === 0) throw new Error(INVALID_CURSOR);
 	}
-	const remaining = hits.slice(start);
-	const page = remaining.slice(0, params.limit);
+	const page = hits.slice(start, start + params.limit);
 	const last = page.at(-1);
 	const end = branch[endIndex];
 	const nextCursor =
-		last && end && remaining.length > page.length
+		last && end && start + page.length < hits.length
 			? encodeCursor({
 					session: sessionId,
 					leaf: end.id,
@@ -899,58 +911,72 @@ function readHistory(params: HistoryReadInput, sessionManager: SessionReader): (
 		throw new Error("maxImages must be greater than 0 when includeImages is true");
 	}
 	const branch = sessionManager.getBranch();
-	const records = buildHistory(branch, latestContextEdits(branch));
+	// Tool calls are returned as stored, not as searchable text. With around 0 only the requested
+	// records are returned, so only their entries are made into records; edits still come from the
+	// whole branch, and an ID that is not readable gets the same error.
+	const records = buildHistory(
+		branch,
+		latestContextEdits(branch),
+		false,
+		params.around === 0 ? new Set(params.entryIds) : undefined,
+	);
 	// Positions of the readable records by entry ID, for this call only; a repeated ID keeps its first.
 	const positionById = new Map<string, number>();
 	for (const [position, record] of records.entries()) {
 		if (!positionById.has(record.entry.id)) positionById.set(record.entry.id, position);
 	}
-	const positions = new Set<number>();
+	const centers: number[] = [];
 	for (const entryId of params.entryIds) {
 		const position = positionById.get(entryId);
 		if (position === undefined) throw unreadableEntryError(entryId, branch);
-		const last = Math.min(records.length - 1, position + params.around);
-		for (let index = Math.max(0, position - params.around); index <= last; index++) positions.add(index);
+		centers.push(position);
+	}
+	// The ranges are taken in branch order, each from after the positions already taken, so every
+	// position is visited once and overlapping ranges are merged.
+	const positions: number[] = [];
+	for (const center of centers.sort((a, b) => a - b)) {
+		const last = Math.min(records.length - 1, center + params.around);
+		for (let index = Math.max((positions.at(-1) ?? -1) + 1, center - params.around); index <= last; index++) {
+			positions.push(index);
+		}
 	}
 
 	const images: ImageContent[] = [];
-	const lines = [...positions]
-		.sort((a, b) => a - b)
-		.map((position) => {
-			const { entry, kind, toolResult, blocks } = records[position];
-			return toJson({
-				entryId: entry.id,
-				timestamp: entry.timestamp,
-				kind,
-				derived: kind === "branch_summary",
-				...(toolResult && {
-					toolName: toolResult.toolName,
-					toolCallId: toolResult.toolCallId,
-					isError: toolResult.isError,
-				}),
-				blocks: blocks.map((block) => {
-					const base = { blockIndex: block.blockIndex, kind: block.kind };
-					if (block.image) {
-						if (!params.includeImages || images.length >= params.maxImages) return { ...base, image: block.text };
-						const { data, mimeType } = block.image;
-						if (data === "" || mimeType === "") {
-							throw new Error(`Image in block ${block.blockIndex} of entry ${entry.id} is unavailable`);
-						}
-						images.push({ type: "image", data, mimeType });
-						return { ...base, image: block.text, attachment: images.length };
+	const lines = positions.map((position) => {
+		const { entry, kind, toolResult, blocks } = records[position];
+		return toJson({
+			entryId: entry.id,
+			timestamp: entry.timestamp,
+			kind,
+			derived: kind === "branch_summary",
+			...(toolResult && {
+				toolName: toolResult.toolName,
+				toolCallId: toolResult.toolCallId,
+				isError: toolResult.isError,
+			}),
+			blocks: blocks.map((block) => {
+				const base = { blockIndex: block.blockIndex, kind: block.kind };
+				if (block.image) {
+					if (!params.includeImages || images.length >= params.maxImages) return { ...base, image: block.text };
+					const { data, mimeType } = block.image;
+					if (data === "" || mimeType === "") {
+						throw new Error(`Image in block ${block.blockIndex} of entry ${entry.id} is unavailable`);
 					}
-					if (block.kind === "tool_call") {
-						return {
-							...base,
-							toolName: block.toolName,
-							toolCallId: block.toolCallId,
-							arguments: block.arguments,
-						};
-					}
-					return { ...base, text: block.text };
-				}),
-			});
+					images.push({ type: "image", data, mimeType });
+					return { ...base, image: block.text, attachment: images.length };
+				}
+				if (block.kind === "tool_call") {
+					return {
+						...base,
+						toolName: block.toolName,
+						toolCallId: block.toolCallId,
+						arguments: block.arguments,
+					};
+				}
+				return { ...base, text: block.text };
+			}),
 		});
+	});
 	return [{ type: "text", text: lines.join("\n") }, ...images];
 }
 

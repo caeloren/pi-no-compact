@@ -147,7 +147,7 @@ function latestContextEdits(branch: readonly SessionEntry[]): Map<string, Contex
 function projectEntry(entry: SessionEntry, edit: ContextEditEntry | undefined): AgentMessage[] {
 	const source = { ...entry, parentId: null } as SessionEntry;
 	const path: SessionEntry[] = edit ? [source, { ...edit, parentId: source.id }] : [source];
-	return buildSessionProjection(path, path[path.length - 1].id).entries[0]?.messages ?? [];
+	return buildSessionProjection(path, path[path.length - 1]!.id).entries[0]?.messages ?? [];
 }
 
 /**
@@ -286,7 +286,9 @@ interface HistoryRecord {
 	readonly entry: SessionEntry;
 	readonly branchIndex: number;
 	readonly kind: HistoryKind;
-	readonly toolResult?: { readonly toolName: string; readonly toolCallId: string; readonly isError: boolean };
+	readonly toolResult:
+		| { readonly toolName: string; readonly toolCallId: string; readonly isError: boolean }
+		| undefined;
 	readonly blocks: readonly HistoryBlock[];
 }
 
@@ -353,7 +355,7 @@ function toJson(value: unknown): string {
 			pending.push({ text: "}" });
 			const fields = Object.entries(current).filter(([, field]) => field !== undefined);
 			for (let index = fields.length - 1; index >= 0; index--) {
-				const [key, field] = fields[index];
+				const [key, field] = fields[index]!;
 				pending.push({ value: field }, { text: `${index > 0 ? "," : ""}${JSON.stringify(key)}:` });
 			}
 		} else {
@@ -491,10 +493,10 @@ function findFirstKeptEntryId(branch: readonly SessionEntry[]): string {
 	const trailingResults: { entryId: string; toolCallId: string }[] = [];
 	let failedAttemptId: string | undefined;
 	for (let index = branch.length - 1; index >= 0; index--) {
-		const entry = branch[index];
+		const entry = branch[index]!;
 		const messages = contextMessages(entry, edits);
 		for (let position = messages.length - 1; position >= 0; position--) {
-			const message = messages[position];
+			const message = messages[position]!;
 			if (!isModelVisible(message)) {
 				if (trailingResults.length > 0 && isFailedAttempt(message)) failedAttemptId ??= entry.id;
 				continue;
@@ -513,7 +515,7 @@ function findFirstKeptEntryId(branch: readonly SessionEntry[]): string {
 					? storedBlocks(message.content).flatMap((block) => (block?.type === "toolCall" ? [block.id] : []))
 					: [];
 			const repeated = calls.findIndex((id, position) => calls.indexOf(id) !== position);
-			if (repeated !== -1) throw repeatedCallError(entry.id, calls[repeated]);
+			if (repeated !== -1) throw repeatedCallError(entry.id, calls[repeated]!);
 			const callIds = new Set(calls);
 			const orphan = trailingResults.find((result) => !callIds.has(result.toolCallId));
 			if (orphan) throw missingCallError(entry.id, orphan.entryId);
@@ -523,7 +525,7 @@ function findFirstKeptEntryId(branch: readonly SessionEntry[]): string {
 			return firstKeptEntryId;
 		}
 	}
-	if (trailingResults.length > 0) throw orphanResultError(trailingResults[0].entryId);
+	if (trailingResults.length > 0) throw orphanResultError(trailingResults[0]!.entryId);
 	throw new Error("No complete message to keep");
 }
 
@@ -539,7 +541,7 @@ function requireEditsInFragment(
 	edits: ReadonlyMap<string, ContextEditEntry>,
 ): void {
 	for (let index = start; index < branch.length; index++) {
-		const entry = branch[index];
+		const entry = branch[index]!;
 		const contributes =
 			entry.type === "custom_message" ||
 			entry.type === "branch_summary" ||
@@ -735,7 +737,7 @@ function encodeCursor(state: CursorState): string {
 }
 
 function decodeCursor(cursor: string): CursorState {
-	const [body] = cursor.split(".", 1);
+	const [body] = cursor.split(".", 1) as [string];
 	if (cursor !== `${body}.${cursorCheck(body)}`) throw new Error(INVALID_CURSOR);
 	let state: unknown;
 	try {
@@ -943,7 +945,7 @@ function readHistory(params: HistoryReadInput, sessionManager: SessionReader): (
 
 	const images: ImageContent[] = [];
 	const lines = positions.map((position) => {
-		const { entry, kind, toolResult, blocks } = records[position];
+		const { entry, kind, toolResult, blocks } = records[position]!;
 		return toJson({
 			entryId: entry.id,
 			timestamp: entry.timestamp,

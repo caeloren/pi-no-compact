@@ -18,12 +18,12 @@ When no complete fragment can be kept, the plugin reports `Compaction failed: <r
 
 ## Usage
 
-Install, update and uninstall the plugin with Pi's git package commands. It is downloaded only through git, never from npm:
+Install, update and uninstall the plugin with Pi's git package commands. It is downloaded only through git, never from npm. `pi install` and `pi update` get the latest commit of main, and `pi uninstall`, the same as `pi remove`, removes the plugin:
 
 ```bash
-pi install git:github.com/caeloren/pi-no-compact    # install the latest commit of main
-pi update git:github.com/caeloren/pi-no-compact     # update to the latest commit of main
-pi uninstall git:github.com/caeloren/pi-no-compact  # remove the plugin; same as pi remove
+pi install git:github.com/caeloren/pi-no-compact
+pi update git:github.com/caeloren/pi-no-compact
+pi uninstall git:github.com/caeloren/pi-no-compact
 ```
 
 The repository has no tags. To stay on one version, install a commit by its full 40-character hash:
@@ -94,7 +94,8 @@ Argument types, required fields and ranges are checked by Pi before the tools ru
 - Pi runs the `session_before_compact` handlers of all extensions in load order. If an extension loaded after this plugin also returns a result, Pi uses that result instead, which can mean Pi's built-in compaction. A cancel from this plugin is final.
 - After the plugin is removed, earlier compaction entries still contain the fixed instruction, which names `history_search` and `history_read`. Those tools no longer exist, so calls to them fail with Pi's `Tool ... not found` error. Removing the plugin does not change or damage the session; it stays readable and usable.
 - The plugin is downloaded only through git, and the package has only four files: `LICENSE`, `README.md`, `package.json` and `index.ts`. It has no dependencies, so the dependency install that Pi runs in the checkout has nothing to download. With npm, Pi's default, that install only writes a `package-lock.json` there. `"private": true` keeps the package off npm.
-- Only the latest Pi release is supported; checked with Pi 1.6.1.
+- Works on macOS, Windows and Linux. The plugin has no platform-specific code, and CRLF line endings, which Git uses on Windows by default, do not change its behavior.
+- Only the latest Pi release is supported; checked with Pi 1.7.0.
 - Licensed under the Sustainable Use License 1.0 (`SUL-1.0`); see `LICENSE`.
 
 
